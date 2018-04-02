@@ -27,103 +27,58 @@ package org.aion.p2p.impl;
 
 import org.aion.p2p.Header;
 import org.aion.p2p.Msg;
+import org.aion.p2p.impl.selector.MainIOLoop;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * @author chris
  */
 public class TaskWrite implements Runnable {
 
-    private ExecutorService workers;
+    private MainIOLoop ioLoop;
     private boolean showLog;
     private String nodeShortId;
     private SocketChannel sc;
     private Msg msg;
-    private ChannelBuffer channelBuffer;
-    private P2pMgr p2pMgr;
 
-    TaskWrite(ExecutorService _workers, boolean _showLog, String _nodeShortId, SocketChannel _sc, Msg _msg,
-            ChannelBuffer _cb, P2pMgr p2pMgr
-
+    TaskWrite(
+            final MainIOLoop ioLoop,
+            final ExecutorService worker,
+            boolean _showLog,
+            String _nodeShortId,
+            final SocketChannel _sc,
+            final Msg _msg
     ) {
-        this.workers = _workers;
+        this.ioLoop = ioLoop;
         this.showLog = _showLog;
         this.nodeShortId = _nodeShortId;
         this.sc = _sc;
         this.msg = _msg;
-        this.channelBuffer = _cb;
-        this.p2pMgr = p2pMgr;
-    }
-
-    private void clearChannelBuffer() {
-        channelBuffer.refreshHeader();
-        channelBuffer.refreshBody();
-        p2pMgr.removeActive(channelBuffer.nodeIdHash);
     }
 
     @Override
     public void run() {
-        // reset allocated buffer and clear messages if the channel is closed
-        if (channelBuffer.isClosed.get()) {
-            clearChannelBuffer();
-            return;
-        }
+        /*
+         * @warning header set len (body len) before header encode
+         */
+        byte[] bodyBytes = msg.encode();
+        int bodyLen = bodyBytes == null ? 0 : bodyBytes.length;
+        Header h = msg.getHeader();
+        h.setLen(bodyLen);
+        byte[] headerBytes = h.encode();
 
-        try {
-            // channelBuffer.lock.tryLock(2, TimeUnit.MILLISECONDS);
-            channelBuffer.lock.lock();
+        // print route
+        // System.out.println("write " + h.getVer() + "-" + h.getCtrl() + "-" + h.getAction());
+        ByteBuffer buf = ByteBuffer.allocate(headerBytes.length + bodyLen);
+        buf.put(headerBytes);
+        if (bodyBytes != null)
+            buf.put(bodyBytes);
+        buf.flip();
 
-            /*
-             * @warning header set len (body len) before header encode
-             */
-            byte[] bodyBytes = msg.encode();
-            int bodyLen = bodyBytes == null ? 0 : bodyBytes.length;
-            Header h = msg.getHeader();
-            h.setLen(bodyLen);
-            byte[] headerBytes = h.encode();
-
-            // print route
-            // System.out.println("write " + h.getVer() + "-" + h.getCtrl() +
-            // "-" + h.getAction());
-            ByteBuffer buf = ByteBuffer.allocate(headerBytes.length + bodyLen);
-            buf.put(headerBytes);
-            if (bodyBytes != null)
-                buf.put(bodyBytes);
-            buf.flip();
-
-            try {
-                while (buf.hasRemaining()) {
-                    sc.write(buf);
-                }
-            } catch (ClosedChannelException ex1) {
-                if (showLog) {
-                    System.out.println("<p2p closed-channel-exception node=" + this.nodeShortId + ">");
-                }
-                channelBuffer.isClosed.set(true);
-            } catch (IOException ex2) {
-                String reason = ex2.getMessage();
-                if (showLog) {
-                    System.out.println("<p2p write-msg-io-exception node=" + this.nodeShortId + ">" + ex2.getMessage());
-                }
-                if (reason.equals("Broken pipe".intern())) {
-                    channelBuffer.isClosed.set(true);
-                }
-            } finally {
-                // channelBuffer.refreshHeader();
-                // channelBuffer.refreshBody();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            // channelBuffer.refreshHeader();
-            // channelBuffer.refreshBody();
-        } finally {
-            channelBuffer.lock.unlock();
-        }
+        // send outbound event to ioLoop for I/O
+        this.ioLoop.write(buf, this.sc);
     }
 }
